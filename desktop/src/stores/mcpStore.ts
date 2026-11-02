@@ -7,6 +7,14 @@ import {
   isSameMcpServer,
   mcpProjectPathKey,
 } from '../lib/mcpIdentity'
+import {
+  createProjectCopies as createProjectCopiesImpl,
+  moveProjectCopiesToSingle as moveProjectCopiesToSingleImpl,
+  moveSingleToProjectCopies as moveSingleToProjectCopiesImpl,
+  syncProjectCopies as syncProjectCopiesImpl,
+  type ProjectFanoutCallbacks,
+  type ProjectFanoutResult,
+} from '../lib/mcpProjectFanout'
 import type { McpServerRecord, McpReconnectResult, McpToggleResult, McpUpsertPayload } from '../types/mcp'
 
 type McpStore = {
@@ -19,6 +27,26 @@ type McpStore = {
   createServer: (name: string, payload: McpUpsertPayload, cwd?: string) => Promise<McpServerRecord>
   updateServer: (server: McpServerRecord, payload: McpUpsertPayload, cwd?: string) => Promise<McpServerRecord>
   deleteServer: (server: McpServerRecord, cwd?: string) => Promise<void>
+  createProjectCopies: (
+    name: string,
+    payload: McpUpsertPayload,
+    projectPaths: string[],
+  ) => Promise<ProjectFanoutResult>
+  syncProjectCopies: (
+    name: string,
+    payload: McpUpsertPayload,
+    projectPaths: string[],
+  ) => Promise<ProjectFanoutResult>
+  moveProjectCopiesToSingle: (
+    name: string,
+    payload: McpUpsertPayload,
+    targetCwd?: string,
+  ) => Promise<ProjectFanoutResult>
+  moveSingleToProjectCopies: (
+    server: McpServerRecord,
+    payload: McpUpsertPayload,
+    projectPaths: string[],
+  ) => Promise<ProjectFanoutResult>
   toggleServer: (server: McpServerRecord, cwd?: string, sessionId?: string) => Promise<McpToggleResult>
   reconnectServer: (server: McpServerRecord, cwd?: string, sessionId?: string) => Promise<McpReconnectResult>
   refreshServerStatus: (server: McpServerRecord, cwd?: string) => Promise<McpServerRecord>
@@ -50,6 +78,21 @@ async function collectKnownProjectPaths(currentWorkDir?: string): Promise<string
 
 function isProjectScoped(server: Pick<McpServerRecord, 'scope'>) {
   return server.scope === 'local' || server.scope === 'project'
+}
+
+const projectFanoutCallbacks: ProjectFanoutCallbacks = {
+  create: async (name, payload, cwd) => (await mcpApi.create(name, payload, cwd)).server,
+  update: async (server, payload, cwd) => (
+    await mcpApi.update(
+      server.name,
+      payload,
+      cwd,
+      isProjectScoped(server) ? server.projectPath : undefined,
+    )
+  ).server,
+  remove: async (server, cwd) => {
+    await mcpApi.remove(server.name, server.scope, cwd)
+  },
 }
 
 function attachProjectPath(server: McpServerRecord, cwd?: string) {
@@ -201,6 +244,47 @@ export const useMcpStore = create<McpStore>((set, get) => ({
           : state.selectedServer,
       error: null,
     }))
+  },
+
+  createProjectCopies: async (name, payload, projectPaths) => {
+    const result = await createProjectCopiesImpl(projectFanoutCallbacks, name, payload, projectPaths)
+    set({ error: null })
+    return result
+  },
+
+  syncProjectCopies: async (name, payload, projectPaths) => {
+    const result = await syncProjectCopiesImpl(
+      projectFanoutCallbacks,
+      name,
+      payload,
+      get().servers,
+      projectPaths,
+    )
+    set({ error: null })
+    return result
+  },
+
+  moveProjectCopiesToSingle: async (name, payload, targetCwd) => {
+    const result = await moveProjectCopiesToSingleImpl(
+      projectFanoutCallbacks,
+      name,
+      get().servers,
+      payload,
+      targetCwd,
+    )
+    set({ error: null })
+    return result
+  },
+
+  moveSingleToProjectCopies: async (server, payload, projectPaths) => {
+    const result = await moveSingleToProjectCopiesImpl(
+      projectFanoutCallbacks,
+      server,
+      payload,
+      projectPaths,
+    )
+    set({ error: null })
+    return result
   },
 
   toggleServer: async (server, cwd, sessionId) => {

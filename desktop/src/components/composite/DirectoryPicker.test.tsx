@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { act } from 'react'
+import { act, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom'
 
@@ -23,12 +23,38 @@ import {
   captureProjectDisplayNameHydrationRevision,
   hydrateProjectDisplayNames,
 } from '../../stores/projectDisplayNameStore'
+import { invalidateRecentProjectsCache } from '../../lib/recentProjectsCache'
+import { mcpProjectPathKey } from '../../lib/mcpIdentity'
+
+function MultiPicker({
+  initialValues = [],
+  onChange,
+}: {
+  initialValues?: string[]
+  onChange?: (values: string[]) => void
+}) {
+  const [values, setValues] = useState(initialValues)
+  return (
+    <DirectoryPicker
+      multiple
+      values={values}
+      onValuesChange={(next) => {
+        setValues(next)
+        onChange?.(next)
+      }}
+      pathKey={mcpProjectPathKey}
+    />
+  )
+}
 
 describe('DirectoryPicker', () => {
   let originalInnerWidth: number
 
   beforeEach(() => {
     originalInnerWidth = window.innerWidth
+    invalidateRecentProjectsCache()
+    vi.mocked(sessionsApi.getRecentProjects).mockReset()
+    Element.prototype.scrollIntoView = vi.fn()
     act(() => {
       hydrateProjectDisplayNames({}, Number.MAX_SAFE_INTEGER)
     })
@@ -260,6 +286,203 @@ describe('DirectoryPicker', () => {
     expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining('validateDOMNesting'))
 
     errorSpy.mockRestore()
+  })
+
+  it('toggles multiple projects without closing and exposes an accessible multiselect listbox', async () => {
+    vi.mocked(sessionsApi.getRecentProjects).mockResolvedValue({
+      projects: [
+        {
+          projectPath: '/workspace/project',
+          realPath: '/workspace/project',
+          projectName: 'project',
+          repoName: 'NanmiCoder/OpenCutSkill',
+          branch: 'main',
+          isGit: true,
+          modifiedAt: '2026-05-07T00:00:00.000Z',
+          sessionCount: 1,
+        },
+        {
+          projectPath: '/workspace/second',
+          realPath: '/workspace/second',
+          projectName: 'second',
+          repoName: 'org/second-project',
+          branch: 'main',
+          isGit: true,
+          modifiedAt: '2026-05-07T00:00:00.000Z',
+          sessionCount: 1,
+        },
+      ],
+    })
+    const onChange = vi.fn()
+
+    render(<MultiPicker onChange={onChange} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Select projects/ }))
+    const listbox = await screen.findByRole('listbox')
+    expect(listbox).toHaveAttribute('aria-multiselectable', 'true')
+
+    fireEvent.click(await screen.findByRole('option', { name: /NanmiCoder\/OpenCutSkill/ }))
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(['/workspace/project']))
+    expect(screen.getByTestId('directory-picker-menu')).toBeInTheDocument()
+
+    fireEvent.click(await screen.findByRole('option', { name: /org\/second-project/ }))
+    await waitFor(() => {
+      expect(onChange).toHaveBeenLastCalledWith(['/workspace/project', '/workspace/second'])
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith([]))
+
+    fireEvent.click(await screen.findByRole('option', { name: /NanmiCoder\/OpenCutSkill/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+    expect(screen.queryByTestId('directory-picker-menu')).not.toBeInTheDocument()
+  })
+
+  it('matches selected projects by normalized Windows path', async () => {
+    vi.mocked(sessionsApi.getRecentProjects).mockResolvedValue({
+      projects: [{
+        projectPath: 'C:\\Workspace\\Project',
+        realPath: 'C:\\Workspace\\Project',
+        projectName: 'Project',
+        repoName: 'org/Project',
+        branch: 'main',
+        isGit: true,
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        sessionCount: 1,
+      }],
+    })
+    const onChange = vi.fn()
+
+    render(<MultiPicker initialValues={['C:/workspace/project']} onChange={onChange} />)
+
+    fireEvent.click(screen.getByRole('button', { name: '1 selected' }))
+    const option = await screen.findByRole('option', { name: /org\/Project/ })
+    expect(option).toHaveAttribute('aria-selected', 'true')
+
+    fireEvent.click(option)
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith([]))
+  })
+
+  it('toggles multi-select from the keyboard without closing the menu', async () => {
+    vi.mocked(sessionsApi.getRecentProjects).mockResolvedValue({
+      projects: [
+        {
+          projectPath: '/workspace/project',
+          realPath: '/workspace/project',
+          projectName: 'project',
+          repoName: 'NanmiCoder/OpenCutSkill',
+          branch: 'main',
+          isGit: true,
+          modifiedAt: '2026-05-07T00:00:00.000Z',
+          sessionCount: 1,
+        },
+        {
+          projectPath: '/workspace/second',
+          realPath: '/workspace/second',
+          projectName: 'second',
+          repoName: 'org/second-project',
+          branch: 'main',
+          isGit: true,
+          modifiedAt: '2026-05-07T00:00:00.000Z',
+          sessionCount: 1,
+        },
+      ],
+    })
+    const onChange = vi.fn()
+
+    render(<MultiPicker onChange={onChange} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Select projects/ }))
+    const search = await screen.findByPlaceholderText('Search projects…')
+
+    fireEvent.keyDown(search, { key: 'Enter' })
+    await waitFor(() => expect(onChange).toHaveBeenCalledWith(['/workspace/project']))
+    expect(screen.getByTestId('directory-picker-menu')).toBeInTheDocument()
+
+    fireEvent.keyDown(search, { key: 'ArrowDown' })
+    fireEvent.keyDown(search, { key: 'Enter' })
+    await waitFor(() => {
+      expect(onChange).toHaveBeenLastCalledWith(['/workspace/project', '/workspace/second'])
+    })
+  })
+
+  it('uses touch-sized rows for multi-select on a mobile viewport', async () => {
+    vi.spyOn(window, 'matchMedia').mockReturnValue({
+      matches: true,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+    } as unknown as MediaQueryList)
+    vi.mocked(sessionsApi.getRecentProjects).mockResolvedValue({
+      projects: [{
+        projectPath: '/workspace/project',
+        realPath: '/workspace/project',
+        projectName: 'project',
+        repoName: 'org/project',
+        branch: 'main',
+        isGit: true,
+        modifiedAt: '2026-05-07T00:00:00.000Z',
+        sessionCount: 1,
+      }],
+    })
+
+    render(<MultiPicker />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Select projects/ }))
+    const option = await screen.findByRole('option', { name: /org\/project/ })
+    expect(option.className).toContain('min-h-[56px]')
+  })
+
+  it('passes multiple to the native dialog and adds every selected folder', async () => {
+    vi.mocked(sessionsApi.getRecentProjects).mockResolvedValue({ projects: [] })
+    const open = vi.fn().mockResolvedValue(['/workspace/native-a', '/workspace/native-b'])
+    window.desktopHost = {
+      ...browserHost,
+      kind: 'electron',
+      isDesktop: true,
+      capabilities: {
+        ...browserHost.capabilities,
+        dialogs: true,
+      },
+      dialogs: {
+        ...browserHost.dialogs,
+        open,
+      },
+    }
+    const onChange = vi.fn()
+
+    render(<MultiPicker onChange={onChange} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Select projects/ }))
+    fireEvent.click(await screen.findByText(/选择其他文件夹|Choose a different folder/))
+
+    await waitFor(() => {
+      expect(onChange).toHaveBeenCalledWith(['/workspace/native-a', '/workspace/native-b'])
+    })
+    expect(open).toHaveBeenCalledWith({
+      directory: true,
+      multiple: true,
+      title: expect.any(String),
+    })
+    expect(filesystemApi.browse).not.toHaveBeenCalled()
+  })
+
+  it('shows multi-select controls in browse mode', async () => {
+    vi.mocked(sessionsApi.getRecentProjects).mockResolvedValue({ projects: [] })
+    vi.mocked(filesystemApi.browse).mockResolvedValue({
+      currentPath: '/workspace',
+      parentPath: '/',
+      entries: [],
+    })
+
+    render(<MultiPicker />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Select projects/ }))
+    fireEvent.click(await screen.findByText(/选择其他文件夹|Choose a different folder/))
+
+    expect(await screen.findByRole('button', { name: 'Clear' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Done' })).toBeInTheDocument()
   })
 
   it('uses the injected desktop host for native folder selection', async () => {

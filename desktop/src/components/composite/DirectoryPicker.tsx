@@ -35,12 +35,28 @@ import { EmptyState } from '@/components/ui/EmptyState'
 import { LoadingState } from '@/components/ui/LoadingState'
 import { MobileBottomSheet } from '@/components/ui/MobileBottomSheet'
 
-type Props = {
-  value: string
-  onChange: (path: string) => void
+type CommonProps = {
   variant?: 'chip' | 'workbar'
   isGitProject?: boolean
+  /** Normalizes paths for selection comparison; defaults to exact strings. */
+  pathKey?: (path: string) => string
 }
+
+const identityPathKey = (path: string) => path
+
+type SingleProps = CommonProps & {
+  multiple?: false
+  value: string
+  onChange: (path: string) => void
+}
+
+type MultiProps = CommonProps & {
+  multiple: true
+  values: string[]
+  onValuesChange: (paths: string[]) => void
+}
+
+type Props = SingleProps | MultiProps
 
 type DirEntry = { name: string; path: string; isDirectory: boolean }
 
@@ -66,7 +82,8 @@ function projectNameFromPath(filePath: string) {
 function RecentProjectItem({
   id,
   project,
-  value,
+  selected,
+  multiple,
   touch,
   highlighted,
   itemRef,
@@ -75,15 +92,16 @@ function RecentProjectItem({
 }: {
   id: string
   project: RecentProject
-  value: string
+  selected: boolean
+  multiple: boolean
   touch: boolean
   highlighted: boolean
   itemRef: (el: HTMLButtonElement | null) => void
   onHover: () => void
   onSelect: (path: string) => void
 }) {
+  const t = useTranslation()
   const displayName = useProjectDisplayName(project.realPath)
-  const isSelected = project.realPath === value
   const label = displayName || project.repoName || project.projectName
 
   return (
@@ -92,15 +110,18 @@ function RecentProjectItem({
       ref={itemRef}
       type="button"
       role="option"
-      aria-selected={isSelected}
+      aria-selected={selected}
+      title={multiple
+        ? t(selected ? 'dirPicker.removeProject' : 'dirPicker.toggleProject', { name: label })
+        : undefined}
       onMouseEnter={onHover}
       onClick={() => onSelect(project.realPath)}
       // Selected and keyboard-highlighted share the hover fill; the terracotta
       // check on the right is what marks the current project.
-      className={`flex w-full items-center gap-2.5 rounded-[var(--radius-sm)] px-2 text-left transition-colors hover:bg-[var(--color-surface-hover)] ${
+      className={`flex w-full items-center gap-2.5 rounded-[var(--radius-sm)] px-2 text-left transition-colors hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${
         touch ? 'min-h-[56px] py-2.5' : 'min-h-8 py-1.5'
       } ${
-        isSelected || highlighted ? 'bg-[var(--color-surface-hover)]' : ''
+        selected || highlighted ? 'bg-[var(--color-surface-hover)]' : ''
       }`}
     >
       {project.isGit ? (
@@ -116,10 +137,42 @@ function RecentProjectItem({
           {project.realPath}
         </div>
       </div>
-      {isSelected && (
+      {selected && (
         <Check size={14} strokeWidth={2} aria-hidden="true" className="shrink-0 text-[var(--color-brand)]" />
       )}
     </button>
+  )
+}
+
+function MultiSelectionFooter({
+  selectedValues,
+  onClear,
+  onDone,
+}: {
+  selectedValues: string[]
+  onClear?: () => void
+  onDone?: () => void
+}) {
+  const t = useTranslation()
+  return (
+    <div className="mt-1 flex items-center justify-between gap-2 border-t border-[var(--color-border)] px-2 pb-1 pt-2">
+      <span className="text-[11px] text-[var(--color-text-tertiary)]">
+        {t('dirPicker.selectedCount', { count: selectedValues.length })}
+      </span>
+      <div className="flex items-center gap-1">
+        <Button
+          variant="link"
+          size="xs"
+          onClick={onClear}
+          disabled={selectedValues.length === 0}
+        >
+          {t('dirPicker.clear')}
+        </Button>
+        <Button size="xs" onClick={onDone}>
+          {t('dirPicker.done')}
+        </Button>
+      </div>
+    </div>
   )
 }
 
@@ -131,6 +184,14 @@ type PanelProps = {
    * first so the next open reflects the new selection.
    */
   onSelect: (path: string) => void
+  /** Enables multi-select. `onToggle` replaces `onSelect` for row clicks. */
+  multiple?: boolean
+  selectedValues?: string[]
+  onToggle?: (path: string) => void
+  onSelectMany?: (paths: string[]) => void
+  onClear?: () => void
+  onDone?: () => void
+  pathKey?: (path: string) => string
   /** Touch density: 56/72px rows instead of the pointer-sized ones. */
   touch?: boolean
   /** The dropdown labels its own list; the bottom sheet has a title bar. */
@@ -169,6 +230,13 @@ type PanelProps = {
 export function RecentProjectsPanel({
   value,
   onSelect,
+  multiple = false,
+  selectedValues = [],
+  onToggle,
+  onSelectMany,
+  onClear,
+  onDone,
+  pathKey = identityPathKey,
   touch = false,
   showRecentHeading = true,
   onBeforeNativeDialog,
@@ -244,6 +312,11 @@ export function RecentProjectsPanel({
     ])
   }, [projects, query, displayNameRevision])
 
+  const selectedKeys = useMemo(
+    () => new Set(selectedValues.map(pathKey)),
+    [pathKey, selectedValues],
+  )
+
   useEffect(() => {
     setSelectedIndex(0)
   }, [query])
@@ -287,7 +360,8 @@ export function RecentProjectsPanel({
   // which used to call `onChange` directly and so left a stale cache behind.
   const handleSelect = (path: string) => {
     invalidateRecentProjectsCache()
-    onSelect(path)
+    if (multiple) onToggle?.(path)
+    else onSelect(path)
   }
 
   const handleChooseFolder = async () => {
@@ -298,10 +372,22 @@ export function RecentProjectsPanel({
       try {
         const selected = await host.dialogs.open({
           directory: true,
-          multiple: false,
-          title: t('dirPicker.chooseProjectFolder'),
+          multiple,
+          title: t(multiple ? 'dirPicker.selectProjects' : 'dirPicker.chooseProjectFolder'),
         })
-        if (typeof selected === 'string' && selected.length > 0) handleSelect(selected)
+        const selectedPaths = (typeof selected === 'string'
+          ? [selected]
+          : Array.isArray(selected)
+            ? selected
+            : []).filter((path) => path.length > 0)
+        if (multiple) {
+          if (selectedPaths.length > 0) {
+            invalidateRecentProjectsCache()
+            onSelectMany?.(selectedPaths)
+          }
+        } else {
+          for (const path of selectedPaths) handleSelect(path)
+        }
       } catch (err) {
         console.error('[DirectoryPicker] Failed to open folder dialog:', err)
       }
@@ -381,6 +467,13 @@ export function RecentProjectsPanel({
             {t('dirPicker.useThisFolder')}
           </Button>
         </div>
+        {multiple && (
+          <MultiSelectionFooter
+            selectedValues={selectedValues}
+            onClear={onClear}
+            onDone={onDone}
+          />
+        )}
       </>
     )
   }
@@ -415,7 +508,8 @@ export function RecentProjectsPanel({
       <div
         id={listboxId}
         role="listbox"
-        aria-label={t('dirPicker.selectProject')}
+        aria-label={t(multiple ? 'dirPicker.selectProjects' : 'dirPicker.selectProject')}
+        aria-multiselectable={multiple || undefined}
         className={`${touch ? 'px-1.5' : 'max-h-[300px]'} overflow-y-auto`}
       >
         {loading ? (
@@ -430,7 +524,8 @@ export function RecentProjectsPanel({
               key={project.projectPath}
               id={`${listboxId}-option-${index}`}
               project={project}
-              value={value}
+              selected={selectedKeys.has(pathKey(project.realPath))}
+              multiple={multiple}
               touch={touch}
               highlighted={index === selectedIndex}
               itemRef={(el) => { itemRefs.current[index] = el }}
@@ -461,11 +556,19 @@ export function RecentProjectsPanel({
           <span className="text-[13px] text-[var(--color-text-primary)]">{t('dirPicker.chooseFolder')}</span>
         </button>
       </div>
+      {multiple && (
+        <MultiSelectionFooter
+          selectedValues={selectedValues}
+          onClear={onClear}
+          onDone={onDone}
+        />
+      )}
     </>
   )
 }
 
-export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProject = false }: Props) {
+export function DirectoryPicker(props: Props) {
+  const { variant = 'chip', isGitProject = false } = props
   const t = useTranslation()
   const [isOpen, setIsOpen] = useState(false)
   const [mode, setMode] = useState<DirectoryPanelMode>('recent')
@@ -474,6 +577,10 @@ export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProjec
   const ref = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const isMobileBrowser = useMobileViewport() && !isDesktopRuntime()
+  const primaryValue = props.multiple ? (props.values[0] ?? '') : props.value
+  const selectedValues = props.multiple ? props.values : primaryValue ? [primaryValue] : []
+  const onValuesChange = props.multiple ? props.onValuesChange : undefined
+  const pathKey = props.pathKey ?? identityPathKey
 
   const dropdownRef = useRef<HTMLDivElement>(null)
 
@@ -525,18 +632,43 @@ export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProjec
   }, [isOpen, updateDropdownPos])
 
   const handleSelect = (path: string) => {
-    onChange(path)
+    if (props.multiple) {
+      const changedKey = pathKey(path)
+      const exists = props.values.some((item) => pathKey(item) === changedKey)
+      props.onValuesChange(
+        exists
+          ? props.values.filter((item) => pathKey(item) !== changedKey)
+          : [...props.values, path],
+      )
+      return
+    }
+    props.onChange(path)
     setIsOpen(false)
     setMode('recent')
   }
 
+  const handleSelectMany = (paths: string[]) => {
+    if (!props.multiple) return
+    const next = new Map(props.values.map((path) => [pathKey(path), path]))
+    for (const path of paths) next.set(pathKey(path), path)
+    props.onValuesChange([...next.values()])
+  }
+
   // Find selected project info
-  const selectedProject = projects.find((p) => p.realPath === value)
-  const selectedProjectKey = selectedProject?.realPath ?? value
+  const selectedProject = projects.find(
+    (p) => pathKey(p.realPath) === pathKey(primaryValue),
+  )
+  const selectedProjectKey = selectedProject?.realPath ?? primaryValue
   const selectedDisplayName = useProjectDisplayName(selectedProjectKey)
   const isWorkbar = variant === 'workbar'
-  const selectedLabel = selectedDisplayName || selectedProject?.repoName || selectedProject?.projectName || projectNameFromPath(value)
+  const selectedLabel = selectedDisplayName || selectedProject?.repoName || selectedProject?.projectName || projectNameFromPath(primaryValue)
   const showGitIcon = selectedProject?.isGit || isGitProject
+  const hasSelection = props.multiple ? props.values.length > 0 : Boolean(primaryValue)
+  const triggerLabel = props.multiple && props.values.length > 0
+    ? t('dirPicker.selectedCount', { count: props.values.length })
+    : selectedLabel
+  const triggerTitle = props.multiple ? props.values.join('\n') : primaryValue
+  const emptyLabel = t(props.multiple ? 'dirPicker.selectProjects' : 'dirPicker.selectProject')
   // The workbar trigger is a form field (ProjectEditorModal's folder row), so it
   // takes the geometry of the secondary button it alternates with there: h-9,
   // 8px corner, a hairline that firms up on hover.
@@ -563,11 +695,20 @@ export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProjec
       : { bottom: window.innerHeight - (dropdownPos?.top ?? 0) }),
     zIndex: 'var(--z-dropdown)',
   }
-  const dropdownTitle = mode === 'recent' ? t('dirPicker.recent') : t('dirPicker.chooseProjectFolder')
+  const dropdownTitle = props.multiple
+    ? t('dirPicker.selectProjects')
+    : mode === 'recent' ? t('dirPicker.recent') : t('dirPicker.chooseProjectFolder')
   const dropdownContent = (
     <RecentProjectsPanel
-      value={value}
+      value={primaryValue}
       onSelect={handleSelect}
+      multiple={props.multiple === true}
+      selectedValues={selectedValues}
+      onToggle={handleSelect}
+      onSelectMany={handleSelectMany}
+      onClear={onValuesChange ? () => onValuesChange([]) : undefined}
+      onDone={close}
+      pathKey={pathKey}
       touch={isMobileBrowser}
       showRecentHeading={!isMobileBrowser}
       onBeforeNativeDialog={() => setIsOpen(false)}
@@ -579,12 +720,14 @@ export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProjec
   return (
     <div ref={ref} className={containerClassName}>
       {/* Trigger — shows selected project chip or placeholder */}
-      {value ? (
+      {hasSelection ? (
         <button
           ref={triggerRef}
           onClick={() => { setIsOpen(!isOpen); setMode('recent') }}
           className={triggerClassName}
-          title={value}
+          title={triggerTitle}
+          aria-haspopup="listbox"
+          aria-expanded={isOpen}
         >
           {showGitIcon ? (
             <FolderGit2 size={isWorkbar ? 16 : 14} strokeWidth={1.75} aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]" />
@@ -592,7 +735,7 @@ export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProjec
             <Folder size={isWorkbar ? 16 : 14} strokeWidth={1.75} aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]" />
           )}
           <span className="min-w-0 flex-1 truncate text-[var(--color-text-primary)]">
-            {selectedLabel}
+            {triggerLabel}
           </span>
           <ChevronDown size={isWorkbar ? 16 : 14} strokeWidth={1.75} aria-hidden="true" className="shrink-0 text-[var(--color-text-tertiary)]" />
         </button>
@@ -601,10 +744,12 @@ export function DirectoryPicker({ value, onChange, variant = 'chip', isGitProjec
           ref={triggerRef}
           onClick={() => { setIsOpen(!isOpen); setMode('recent') }}
           className={emptyTriggerClassName}
-          title={t('dirPicker.selectProject')}
+          title={emptyLabel}
+          aria-haspopup="listbox"
+          aria-expanded={isOpen}
         >
           <FolderOpen size={isWorkbar ? 16 : 14} strokeWidth={1.75} aria-hidden="true" className="shrink-0" />
-          <span className="min-w-0 truncate">{t('dirPicker.selectProject')}</span>
+          <span className="min-w-0 truncate">{emptyLabel}</span>
         </button>
       )}
 
